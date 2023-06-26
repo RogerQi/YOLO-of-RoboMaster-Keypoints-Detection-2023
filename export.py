@@ -22,7 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('--img-size', nargs='+', type=int, default=[416, 416], help='image size')  # height, width
     parser.add_argument('--batch-size', type=int, default=1, help='batch size')
     parser.add_argument('--grid', action='store_true', help='export Detect() layer grid')
-    parser.add_argument('--device', default='1', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--dynamic', action='store_true', help='dynamic ONNX axes')  # ONNX-only
     parser.add_argument('--simplify', type=bool, default=True, help='simplify ONNX model')  # ONNX-only
     parser.add_argument('--export-nms', action='store_true',
@@ -43,7 +43,10 @@ if __name__ == '__main__':
     opt.img_size = [check_img_size(x, gs) for x in opt.img_size]  # verify img_size are gs-multiples
 
     # Input
-    img = torch.zeros(opt.batch_size, 3, *opt.img_size).to(device)
+    # img = torch.zeros(opt.batch_size, 3, *opt.img_size).to(device)
+
+    # torch2trt seems to need at least a real image for NMS
+    img = torch.load('test.pt').to(device).float()
 
     # Update model
     for k, m in model.named_modules():
@@ -60,8 +63,8 @@ if __name__ == '__main__':
         y = model(img)  # dry runs
     output_names = None
     if opt.export_nms:
-        nms = models.common.NMS(conf=0.01, kpt_label=True)
-        nms_export = models.common.NMS_Export(conf=0.01, kpt_label=True)
+        nms = models.common.NMS(conf=0.01, kpt_label=False)
+        nms_export = models.common.NMS_Export(conf=0.01, kpt_label=False)
         y_export = nms_export(y)
         y = nms(y)
         # assert (torch.sum(torch.abs(y_export[0]-y[0]))<1e-6)
@@ -79,6 +82,22 @@ if __name__ == '__main__':
         ts = torch.jit.trace(model, img, strict=False)
         ts = optimize_for_mobile(ts)  # https://pytorch.org/tutorials/recipes/script_optimized.html
         ts.save(f)
+        print(f'{prefix} export success, saved as {f} ({file_size(f):.1f} MB)')
+    except Exception as e:
+        print(f'{prefix} export failure: {e}')
+    
+    # torch2trt export ------------------------------------------------------------------------------------------------
+    prefix = colorstr('TensorRT:')
+    try:
+        import torch2trt
+        f = opt.weights.replace('.pt', '.trt.pth')  # filename
+        print(f'{prefix} starting export with torch2trt...')
+        if opt.export_nms:
+            raise NotImplementedError  # TODO: NMS export doesn't work at the moment
+            model_trt = torch2trt.torch2trt(model_nms, [img], fp16_mode=True)
+        else:
+            model_trt = torch2trt.torch2trt(model, [img])
+        torch.save(model_trt.state_dict(), f)
         print(f'{prefix} export success, saved as {f} ({file_size(f):.1f} MB)')
     except Exception as e:
         print(f'{prefix} export failure: {e}')
@@ -125,18 +144,18 @@ if __name__ == '__main__':
         print(f'{prefix} export failure: {e}')
 
     # CoreML export ----------------------------------------------------------------------------------------------------
-    prefix = colorstr('CoreML:')
-    try:
-        import coremltools as ct
+    # prefix = colorstr('CoreML:')
+    # try:
+    #     import coremltools as ct
 
-        print(f'{prefix} starting export with coremltools {ct.__version__}...')
-        # convert model from torchscript and apply pixel scaling as per detect.py
-        model = ct.convert(ts, inputs=[ct.ImageType(name='image', shape=img.shape, scale=1 / 255.0, bias=[0, 0, 0])])
-        f = opt.weights.replace('.pt', '.mlmodel')  # filename
-        model.save(f)
-        print(f'{prefix} export success, saved as {f} ({file_size(f):.1f} MB)')
-    except Exception as e:
-        print(f'{prefix} export failure: {e}')
+    #     print(f'{prefix} starting export with coremltools {ct.__version__}...')
+    #     # convert model from torchscript and apply pixel scaling as per detect.py
+    #     model = ct.convert(ts, inputs=[ct.ImageType(name='image', shape=img.shape, scale=1 / 255.0, bias=[0, 0, 0])])
+    #     f = opt.weights.replace('.pt', '.mlmodel')  # filename
+    #     model.save(f)
+    #     print(f'{prefix} export success, saved as {f} ({file_size(f):.1f} MB)')
+    # except Exception as e:
+    #     print(f'{prefix} export failure: {e}')
 
     # Finish
     print(f'\nExport complete ({time.time() - t:.2f}s). Visualize with https://github.com/lutzroeder/netron.')
